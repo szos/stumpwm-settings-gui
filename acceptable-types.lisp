@@ -1,5 +1,5 @@
 (in-package :stumpwm-settings-gui)
 
 (defun acceptable-type-p (ts)
-  (declare (ignore ts))
-  t)
+  (not (and (listp ts)
+            (member (car ts) '(member or and)))))

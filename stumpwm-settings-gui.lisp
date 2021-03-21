@@ -6,7 +6,7 @@
   ((type-filter :initform "" :accessor type-filter)
    (active-filter :initform "" :accessor active-filter))
   (:panes (main-display :application
-                        :incremental-redisplay t
+                        :incremental-redisplay nil
                         :display-function 'display-main)
           (interactor :interactor))
   (:layouts
@@ -16,6 +16,17 @@
       (vertically (:equalize-width t)
         (horizontally ()
           +fill+
+          (make-pane 'push-button
+                     :label "Reset Filters"
+                     :activate-callback
+                     (lambda (gadget)
+                       (let ((frame (gadget-client gadget)))
+                         (setf (active-filter frame) ""
+                               (type-filter frame) "")
+                         (redisplay-frame-pane frame
+                                               (find-pane-named frame
+                                                                'main-display)
+                                               :force-p t))))
           (make-pane 'push-button
                      :label "Save Settings"
                      :activate-callback
