@@ -2,44 +2,66 @@
 
 (in-package #:stumpwm-settings-gui)
 
+(defmacro mkbutton (name fn)
+  `(make-pane 'push-button
+              :label ,name
+              :activate-callback ,fn))
+
 (define-application-frame stumpwm-settings-inspector ()
   ((type-filter :initform "" :accessor type-filter)
-   (active-filter :initform "" :accessor active-filter))
+   (active-filter :initform "" :accessor active-filter :initarg :filter))
   (:panes (main-display :application
+                        :scroll-bars nil
                         :incremental-redisplay nil
                         :display-function 'display-main)
-          (interactor :interactor))
+          (interactor :interactor)
+          (filters :application
+                   :incremental-redisplay nil
+                   :display-function 'display-filters
+                   :scroll-bars nil))
   (:layouts
    (default
     (labelling (:label "Customize StumpWM Settings"
                 :text-style (make-text-style :serif :roman :huge))
       (vertically (:equalize-width t)
         (horizontally ()
+          (mkbutton "Filter Names"
+                    (lambda (gadget)
+                      (let ((frame (gadget-client gadget)))
+                        (execute-frame-command frame '(com-filter-name)))))
+          (mkbutton "Filter Types"
+                    (lambda (gadget)
+                      (let ((frame (gadget-client gadget)))
+                        (execute-frame-command frame '(com-filter-type)))))
+          (mkbutton "Clear Filters"
+                    (lambda (gadget)
+                      (let* ((frame (gadget-client gadget))
+                             (redisp (and (string= (active-filter frame) "")
+                                          (string= (type-filter frame) ""))))
+                        (setf (active-filter frame) ""
+                              (type-filter frame) "")
+                        (unless redisp
+                          (redisplay-frame-pane frame
+                                                (find-pane-named frame
+                                                                 'main-display)
+                                                :force-p t)
+                          (redisplay-frame-pane frame
+                                                (find-pane-named frame
+                                                                 'filters)
+                                                :force-p t)))))
+          
           +fill+
-          (make-pane 'push-button
-                     :label "Reset Filters"
-                     :activate-callback
-                     (lambda (gadget)
-                       (let ((frame (gadget-client gadget)))
-                         (setf (active-filter frame) ""
-                               (type-filter frame) "")
-                         (redisplay-frame-pane frame
-                                               (find-pane-named frame
-                                                                'main-display)
-                                               :force-p t))))
-          (make-pane 'push-button
-                     :label "Save Settings"
-                     :activate-callback
-                     (lambda (gadget)
-                       (declare (ignore gadget))
-                       (stumpwm-settings::write-settings-to-file)))
-          (make-pane 'push-button
-                     :label "Quit"
-                     :activate-callback
-                     (lambda (gadget)
-                       (let ((frame (gadget-client gadget)))
-                         (frame-exit frame)))))
-        (:fill main-display)
+          (mkbutton "Save Settings"
+                    (lambda (gadget)
+                      (declare (ignore gadget))
+                      (stumpwm-settings::write-settings-to-file)))
+          (mkbutton "Quit"
+                    (lambda (gadget)
+                      (let ((frame (gadget-client gadget)))
+                        (frame-exit frame))))
+          )
+        (20 filters)
+        (:fill (scrolling () main-display))
         (1/4 interactor))))))
 
 (defmacro defc (name-and-options arguments &body body)
@@ -51,7 +73,8 @@
 (define-presentation-method present
     (config-info (type defconfig::config-info) stream view &key)
   (format stream
-          "~&Setting: ~S~%~4TCurrent Value: ~S~%~4TDefault Value: ~S~%~4TType Description: ~S~%"
+          ;; "~&Setting: ~S~%~4TCurrent Value: ~S~%~4TDefault Value: ~S~%~4TType Description: ~S~%"
+          "~&~S~%~4TCurrent Value: ~S~%~4TDefault Value: ~S~%~4TType Description: ~S~%"
           (defconfig:config-info-place config-info)
           (symbol-value (defconfig:config-info-place config-info))
           (defconfig:config-info-default-value config-info)
@@ -67,8 +90,13 @@
          (validated? (and config-info 
                           (funcall (defconfig:config-info-predicate config-info)
                                    val))))
-    (when validated?
-      (setf (symbol-value symbol) val))))
+    (stumpwm:call-in-main-thread
+     (lambda () 
+       (if validated?
+           (setf (symbol-value symbol) val)
+           (notify-user *application-frame*
+                        (format nil "~A isn't a valid value for ~A"
+                                val symbol)))))))
 
 (define-presentation-to-command-translator customize-setting
     (defconfig::config-info com-customize stumpwm-settings-inspector
@@ -82,7 +110,9 @@
               (read-from-string (accept 'string))))))
 
 (defc (com-reset-setting :name t) ((symbol symbol))
-  (defconfig:reset-computed-place symbol :db stumpwm-settings::*stumpwm-db*))
+  (stumpwm:call-in-main-thread
+   (lambda () 
+     (defconfig:reset-computed-place symbol :db stumpwm-settings::*stumpwm-db*))))
 
 (define-presentation-to-command-translator reset-setting
     (defconfig::config-info com-reset-setting stumpwm-settings-inspector
@@ -97,8 +127,6 @@
   (setf (type-filter *application-frame*) string))
 
 (defun satisfy-filter (frame setting)
-  (loop for setting being the hash-value of (cdr stumpwm-settings::*stumpwm-db*)
-        if )
   (let ((filter (active-filter frame))
         (dc-symbol (defconfig:config-info-place setting)))
     (cond ((stringp filter)
@@ -130,12 +158,43 @@
   (with-end-of-line-action (pane :allow)
     (with-end-of-page-action (pane :allow)
       (loop for setting being the hash-value of (cdr stumpwm-settings::*stumpwm-db*)
-            with filter = (active-filter frame)
-            with tfilter = (type-filter frame)
+            with filter = (string-trim '(#\space) (active-filter frame))
+            with tfilter = (string-trim '(#\space) (type-filter frame))
             when (and (satisfy-filter filter setting)
                       (satisfy-type-filter tfilter setting))
-              do (present setting 'defconfig::config-info :stream pane)))))
+              do (present setting 'defconfig::config-info :stream pane
+                                                          :single-box t)))))
 
-(defun app-main ()
-  (let ((frame (make-application-frame 'stumpwm-settings-inspector)))
-    (run-frame-top-level frame)))
+(defun display-filters (frame pane)
+  (let ((name (active-filter frame))
+        (type (type-filter frame)))
+    (when (and name type) 
+      (slim:with-table (pane)
+        (slim:row
+          (slim:cell (format pane "Name Filter: "))
+          (slim:cell (format pane "~S" name))
+          (slim:cell (format pane "Type Filter: "))
+          (slim:cell (format pane "~S" type)))))))
+
+(defun app-main (&optional filter)
+  (let ((frame (make-application-frame 'stumpwm-settings-inspector
+                                       :filter (or filter ""))))
+    (handler-bind ((simple-error
+                     (lambda (c)
+                       (declare (ignore c))
+                       (let ((r (find-restart 'clim-clx::use-localhost)))
+                         (when r
+                           (invoke-restart 'clim-clx::use-localhost))))))
+      (run-frame-top-level frame))))
+
+(in-package :stumpwm)
+
+(defvar *customize-thread* nil)
+
+(defcommand customize (&optional filter) ((:rest))
+  (if (and (typep *customize-thread* 'sb-thread:thread)
+           (sb-thread:thread-alive-p *customize-thread*))
+      (message "Customizer thread already running")
+      (setf *customize-thread*
+            (sb-thread:make-thread (lambda ()
+                                     (stumpwm-settings-gui::app-main filter))))))
