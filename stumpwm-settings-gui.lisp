@@ -53,13 +53,13 @@
           +fill+
           (mkbutton "Save Settings"
                     (lambda (gadget)
-                      (declare (ignore gadget))
-                      (stumpwm-settings::write-settings-to-file)))
+                      (let ((frame (gadget-client gadget)))
+                        (stumpwm-settings::write-settings-to-file)
+                        (notify-user frame "Settings saved to ~/.stumpwm.d/customize-variables.lisp" :exit-boxes '((:ok "OK"))))))
           (mkbutton "Quit"
                     (lambda (gadget)
                       (let ((frame (gadget-client gadget)))
-                        (frame-exit frame))))
-          )
+                        (frame-exit frame)))))
         (20 filters)
         (:fill (scrolling () main-display))
         (1/4 interactor))))))
@@ -82,21 +82,10 @@
               (defconfig:config-info-valid-values-description config-info))))
 
 (defc (com-customize :name t) ((symbol symbol) (v t))
-  (let* ((val v)
-         (config-info (handler-case (defconfig::%fsetv-get-config-info-object
-                                     symbol (cdr stumpwm-settings::*stumpwm-db*)
-                                     'stumpwm-settings::*stumpwm-db*)
-                        (error () nil)))
-         (validated? (and config-info 
-                          (funcall (defconfig:config-info-predicate config-info)
-                                   val))))
-    (stumpwm:call-in-main-thread
-     (lambda () 
-       (if validated?
-           (setf (symbol-value symbol) val)
-           (notify-user *application-frame*
-                        (format nil "~A isn't a valid value for ~A"
-                                val symbol)))))))
+  (let ((valid (stumpwm-settings:customize symbol v)))
+    (when (eq valid :invalid)
+      (notify-user *application-frame*
+                   (format nil "~A isn't a valid value for ~A" v symbol)))))
 
 (define-presentation-to-command-translator customize-setting
     (defconfig::config-info com-customize stumpwm-settings-inspector
@@ -179,13 +168,18 @@
 (defun app-main (&optional filter)
   (let ((frame (make-application-frame 'stumpwm-settings-inspector
                                        :filter (or filter ""))))
-    (handler-bind ((simple-error
-                     (lambda (c)
-                       (declare (ignore c))
-                       (let ((r (find-restart 'clim-clx::use-localhost)))
-                         (when r
-                           (invoke-restart 'clim-clx::use-localhost))))))
-      (run-frame-top-level frame))))
+    (handler-case 
+        (handler-bind ((simple-error
+                         (lambda (c)
+                           (declare (ignore c))
+                           (let ((r (find-restart 'clim-clx::use-localhost)))
+                             (when r
+                               (invoke-restart 'clim-clx::use-localhost))))))
+          (run-frame-top-level frame))
+      (error (c)
+        (notify-user nil
+                     (format nil "Encountered error ~A and quit" c))
+        (frame-exit frame)))))
 
 (in-package :stumpwm)
 
@@ -196,5 +190,6 @@
            (sb-thread:thread-alive-p *customize-thread*))
       (message "Customizer thread already running")
       (setf *customize-thread*
-            (sb-thread:make-thread (lambda ()
-                                     (stumpwm-settings-gui::app-main filter))))))
+            (sb-thread:make-thread
+             (lambda ()
+               (stumpwm-settings-gui::app-main filter))))))
